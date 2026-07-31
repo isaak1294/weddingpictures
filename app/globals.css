@@ -1,26 +1,25 @@
 @import "tailwindcss";
 
+/* Wedding theme — sage green & navy blue */
+@theme {
+  --color-navy: #1c2b4a;
+  --color-navy-deep: #121d33;
+  --color-sage: #8ba888;
+  --color-sage-deep: #6c8a68;
+  --color-sage-soft: #dfe7da;
+  --color-cream: #f6f5ef;
+
+  --font-serif: var(--font-cormorant);
+  --font-sans: var(--font-geist);
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: var(--color-cream);
+  --foreground: var(--color-navy);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
