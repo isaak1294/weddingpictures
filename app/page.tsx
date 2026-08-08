@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   compressImage,
+  needsCompression,
   uploadFile,
   MAX_UPLOAD_BYTES,
   type UploadHandle,
@@ -124,8 +125,10 @@ export default function Home() {
       const current = itemsRef.current.find((it) => it.id === id);
       if (!current) return;
 
+      // Only touch a file if it's an image that's too big to upload as-is;
+      // everything that already fits is uploaded untouched (full quality).
       let toUpload = current.file;
-      if (current.file.type.startsWith("image/")) {
+      if (needsCompression(current.file)) {
         patchItem(id, { status: "compressing", progress: 0 });
         try {
           toUpload = await compressImage(current.file);
@@ -476,8 +479,8 @@ export default function Home() {
         </div>
 
         <p className="text-center text-navy/40 text-xs mt-6">
-          Photos are gently resized for faster uploading and shared privately
-          with the couple.
+          Photos upload at full quality and are shared privately with the
+          couple. Very large photos are resized only if needed to send.
         </p>
       </div>
     </main>

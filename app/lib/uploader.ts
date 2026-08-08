@@ -1,44 +1,39 @@
-// Client-side upload engine: compress images in the browser, then upload each
-// file as its own small request with real progress events.
+// Client-side upload engine: upload each file as its own small request with
+// real progress events, compressing an image ONLY when its original size would
+// exceed the request-body cap.
 //
-// Why compress? The app is hosted on Vercel, which caps request bodies at
-// ~4.5 MB. A full-resolution phone photo often exceeds that, so it could never
-// reach /api/upload. Downscaling to ~3000 px at high quality brings virtually
-// every photo well under the cap and makes uploads far faster on mobile data.
+// Why the cap matters: the app is hosted on Vercel, which rejects request
+// bodies over ~4.5 MB, so a file larger than that could never reach
+// /api/upload. Photos that already fit are uploaded byte-for-byte untouched
+// (full resolution, original format, EXIF intact). Only oversized ones are
+// shrunk — and only as much as needed to squeeze under the cap.
 
 /** Stay comfortably under Vercel's ~4.5 MB body cap (leaves room for multipart overhead). */
 export const MAX_UPLOAD_BYTES = 4.3 * 1024 * 1024;
 
-const DEFAULTS = {
-  maxEdge: 3000, // longest side, in pixels
-  quality: 0.9, // JPEG quality
-  targetBytes: 3.6 * 1024 * 1024, // shrink until the encoded image is under this
-};
+/** When we must compress, aim just under the cap to preserve as much quality as possible. */
+const COMPRESS_TARGET_BYTES = 4.0 * 1024 * 1024;
+
+/** True only for images that are too large to upload as-is. */
+export function needsCompression(file: File): boolean {
+  return file.type.startsWith("image/") && file.size > MAX_UPLOAD_BYTES;
+}
 
 function renameToJpg(name: string): string {
   return name.replace(/\.[^.]+$/, "") + ".jpg";
 }
 
 /**
- * Downscale/re-encode an image to fit under the size cap. Returns the original
- * file unchanged for non-images, or when the browser can't decode it (e.g. HEIC
- * on Android) — the caller then decides whether it still fits.
+ * Shrink an over-cap image just enough to fit, trying to keep full resolution
+ * and only stepping down quality/dimensions as needed. Returns the original
+ * file unchanged when it already fits, isn't an image, or can't be decoded
+ * (e.g. HEIC on Android) — the caller then flags anything still too large.
  */
 export async function compressImage(
   file: File,
-  opts: Partial<typeof DEFAULTS> = {}
+  targetBytes: number = COMPRESS_TARGET_BYTES
 ): Promise<File> {
-  const { maxEdge, quality, targetBytes } = { ...DEFAULTS, ...opts };
-
-  if (!file.type.startsWith("image/")) return file;
-
-  // Already small and in a universally-viewable format — keep the original bytes.
-  if (
-    file.size <= targetBytes &&
-    /^image\/(jpeg|png|webp)$/.test(file.type)
-  ) {
-    return file;
-  }
+  if (!needsCompression(file)) return file;
 
   let bitmap: ImageBitmap;
   try {
@@ -51,10 +46,20 @@ export async function compressImage(
 
   try {
     const { width, height } = bitmap;
-    const longest = Math.max(width, height);
-    let scale = longest > maxEdge ? maxEdge / longest : 1;
 
-    for (let attempt = 0; attempt < 6; attempt++) {
+    // Try highest fidelity first, easing off only when still over target:
+    // keep full resolution and drop quality, then downscale as a last resort.
+    const steps: Array<{ scale: number; quality: number }> = [
+      { scale: 1, quality: 0.92 },
+      { scale: 1, quality: 0.85 },
+      { scale: 1, quality: 0.8 },
+    ];
+    for (let scale = 0.85; scale >= 0.3; scale *= 0.85) {
+      steps.push({ scale, quality: 0.82 });
+    }
+
+    let last: Blob | null = null;
+    for (const { scale, quality } of steps) {
       const w = Math.max(1, Math.round(width * scale));
       const h = Math.max(1, Math.round(height * scale));
 
@@ -68,22 +73,24 @@ export async function compressImage(
       const blob = await new Promise<Blob | null>((resolve) =>
         canvas.toBlob(resolve, "image/jpeg", quality)
       );
-      if (!blob) return file;
-
-      const smallEnough = blob.size <= targetBytes;
-      const giveUp = scale <= 0.3 && attempt >= 1;
-      if (smallEnough || giveUp) {
-        return new File([blob], renameToJpg(file.name), {
-          type: "image/jpeg",
-          lastModified: file.lastModified,
-        });
-      }
-      scale *= 0.8; // still too big — shrink and try again
+      if (!blob) return last ? toFile(last, file) : file;
+      last = blob;
+      if (blob.size <= targetBytes) return toFile(blob, file);
     }
-    return file;
+
+    // Couldn't get under target even at the smallest step — send the smallest
+    // we produced; the caller flags it if it's still over the hard cap.
+    return last ? toFile(last, file) : file;
   } finally {
     bitmap.close();
   }
+}
+
+function toFile(blob: Blob, original: File): File {
+  return new File([blob], renameToJpg(original.name), {
+    type: "image/jpeg",
+    lastModified: original.lastModified,
+  });
 }
 
 export type UploadHandle = { promise: Promise<void>; abort: () => void };
