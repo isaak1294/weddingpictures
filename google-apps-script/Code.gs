@@ -27,9 +27,14 @@ function doPost(e) {
 
     var body = JSON.parse(e.postData.contents);
 
-    // Shared-secret check so only our app can upload.
-    if (UPLOAD_TOKEN && body.token !== UPLOAD_TOKEN) {
-      return json({ ok: false, error: "Unauthorized." });
+    // Auth: accept either the raw shared secret (server-to-server proxy path)
+    // or a valid, unexpired signed ticket (direct-from-browser path).
+    if (UPLOAD_TOKEN) {
+      var okToken = body.token === UPLOAD_TOKEN;
+      var okTicket = verifyTicket(body.ticket, UPLOAD_TOKEN);
+      if (!okToken && !okTicket) {
+        return json({ ok: false, error: "Unauthorized." });
+      }
     }
 
     if (!body.files || !body.files.length) {
@@ -60,6 +65,39 @@ function doPost(e) {
 // Simple health check so you can open the Web app URL in a browser.
 function doGet() {
   return json({ ok: true, message: "Wedding uploader is running." });
+}
+
+// Verifies a `<expiry>.<hmac>` ticket signed with the shared secret. The ticket
+// lets the browser upload directly without ever holding the real secret.
+function verifyTicket(ticket, secret) {
+  if (!ticket || !secret) return false;
+  var parts = String(ticket).split(".");
+  if (parts.length !== 2) return false;
+
+  var exp = parseInt(parts[0], 10);
+  if (!exp || exp < Date.now() / 1000) return false; // missing or expired
+
+  var expected = hmacSha256Hex(secret, parts[0]);
+  return constantTimeEquals(expected, parts[1]);
+}
+
+function hmacSha256Hex(secret, message) {
+  var raw = Utilities.computeHmacSha256Signature(message, secret);
+  var hex = "";
+  for (var i = 0; i < raw.length; i++) {
+    var b = (raw[i] < 0 ? raw[i] + 256 : raw[i]).toString(16);
+    hex += b.length === 1 ? "0" + b : b;
+  }
+  return hex;
+}
+
+function constantTimeEquals(a, b) {
+  if (a.length !== b.length) return false;
+  var diff = 0;
+  for (var i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 function getOrCreateSubfolder(parent, name) {

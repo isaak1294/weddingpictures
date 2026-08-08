@@ -5,7 +5,10 @@ import {
   compressImage,
   needsCompression,
   uploadFile,
+  uploadDirect,
+  getTicket,
   MAX_UPLOAD_BYTES,
+  DIRECT_MAX_BYTES,
   type UploadHandle,
 } from "./lib/uploader";
 
@@ -119,64 +122,105 @@ export default function Home() {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
-  // --- the worker: compress then upload one file, with retries ---
+  // Run one upload attempt via the chosen path. Returns the outcome; on
+  // success/cancel it finalizes the item, otherwise the caller decides.
+  const runAttempt = useCallback(
+    async (
+      id: string,
+      kind: "direct" | "proxy",
+      payload: File
+    ): Promise<"done" | "aborted" | "failed"> => {
+      patchItem(id, { status: "uploading", progress: 0, error: undefined });
+      let handle: UploadHandle;
+      try {
+        if (kind === "direct") {
+          const { ticket, url } = await getTicket();
+          handle = uploadDirect(payload, nameRef.current, ticket, url, (frac) =>
+            patchItem(id, { progress: frac })
+          );
+        } else {
+          handle = uploadFile(payload, nameRef.current, (frac) =>
+            patchItem(id, { progress: frac })
+          );
+        }
+      } catch {
+        return "failed"; // couldn't even start (e.g. ticket fetch failed)
+      }
+
+      handles.current.set(id, handle);
+      try {
+        await handle.promise;
+        handles.current.delete(id);
+        patchItem(id, { status: "done", progress: 1 });
+        return "done";
+      } catch (err) {
+        handles.current.delete(id);
+        if (err instanceof DOMException && err.name === "AbortError") {
+          patchItem(id, { status: "canceled", progress: 0 });
+          return "aborted";
+        }
+        return "failed";
+      }
+    },
+    [patchItem]
+  );
+
+  // --- the worker: upload one file, full-res via Google when possible ---
   const processItem = useCallback(
     async (id: string) => {
       const current = itemsRef.current.find((it) => it.id === id);
       if (!current) return;
+      const file = current.file;
 
-      // Only touch a file if it's an image that's too big to upload as-is;
-      // everything that already fits is uploaded untouched (full quality).
-      let toUpload = current.file;
-      if (needsCompression(current.file)) {
-        patchItem(id, { status: "compressing", progress: 0 });
-        try {
-          toUpload = await compressImage(current.file);
-        } catch {
-          toUpload = current.file; // fall back to the original
+      // 1) Direct-to-Google path: full quality, bypasses the server body cap.
+      if (file.size <= DIRECT_MAX_BYTES) {
+        for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+          const r = await runAttempt(id, "direct", file);
+          if (r === "done" || r === "aborted") return;
+          if (attempt < MAX_ATTEMPTS)
+            await new Promise((res) => setTimeout(res, 700 * attempt));
         }
-      }
-
-      if (toUpload.size > MAX_UPLOAD_BYTES) {
+        // Direct path failed (e.g. blocked) — fall through to the proxy path.
+      } else {
         patchItem(id, {
           status: "error",
-          error: `Too large to upload here (${formatBytes(
-            toUpload.size
-          )}). Videos and huge files exceed the server limit.`,
+          error: `Too large to upload (${formatBytes(
+            file.size
+          )}). Very large videos exceed Google's limit — please share those another way.`,
         });
         return;
       }
 
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-        patchItem(id, { status: "uploading", progress: 0, error: undefined });
-        const handle = uploadFile(toUpload, nameRef.current, (frac) =>
-          patchItem(id, { progress: frac })
-        );
-        handles.current.set(id, handle);
+      // 2) Server-proxy fallback: only works under the ~4.3 MB cap, so resize
+      //    the image if (and only if) it's over the limit.
+      let toUpload = file;
+      if (needsCompression(file)) {
+        patchItem(id, { status: "compressing", progress: 0 });
         try {
-          await handle.promise;
-          handles.current.delete(id);
-          patchItem(id, { status: "done", progress: 1 });
-          return;
-        } catch (err) {
-          handles.current.delete(id);
-          if (err instanceof DOMException && err.name === "AbortError") {
-            patchItem(id, { status: "canceled", progress: 0 });
-            return;
-          }
-          if (attempt === MAX_ATTEMPTS) {
-            patchItem(id, {
-              status: "error",
-              error: err instanceof Error ? err.message : "Upload failed.",
-            });
-            return;
-          }
-          // brief backoff before retrying
-          await new Promise((r) => setTimeout(r, 800 * attempt));
+          toUpload = await compressImage(file);
+        } catch {
+          toUpload = file;
         }
       }
+      if (toUpload.size > MAX_UPLOAD_BYTES) {
+        patchItem(id, {
+          status: "error",
+          error: "Upload failed after several tries. Please retry.",
+        });
+        return;
+      }
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const r = await runAttempt(id, "proxy", toUpload);
+        if (r === "done" || r === "aborted") return;
+        if (attempt < 2) await new Promise((res) => setTimeout(res, 700 * attempt));
+      }
+      patchItem(id, {
+        status: "error",
+        error: "Upload failed after several tries. Please retry.",
+      });
     },
-    [patchItem]
+    [patchItem, runAttempt]
   );
 
   // --- the pool: keep up to CONCURRENCY items processing ---
@@ -479,8 +523,8 @@ export default function Home() {
         </div>
 
         <p className="text-center text-navy/40 text-xs mt-6">
-          Photos upload at full quality and are shared privately with the
-          couple. Very large photos are resized only if needed to send.
+          Photos upload at full resolution, straight to our album, and are
+          shared privately with the couple.
         </p>
       </div>
     </main>

@@ -11,6 +11,14 @@
 /** Stay comfortably under Vercel's ~4.5 MB body cap (leaves room for multipart overhead). */
 export const MAX_UPLOAD_BYTES = 4.3 * 1024 * 1024;
 
+/**
+ * Ceiling for the direct-to-Google path. Apps Script accepts a POST body of a
+ * few tens of MB; base64 inflates the file ~1.33×, so we cap the raw file well
+ * below that. Covers every photo and short phone videos. Truly large videos
+ * exceed Google's own limit and must be shared another way.
+ */
+export const DIRECT_MAX_BYTES = 30 * 1024 * 1024;
+
 /** When we must compress, aim just under the cap to preserve as much quality as possible. */
 const COMPRESS_TARGET_BYTES = 4.0 * 1024 * 1024;
 
@@ -141,4 +149,126 @@ export function uploadFile(
   });
 
   return { promise, abort: () => xhr.abort() };
+}
+
+// --- Direct-to-Google path (bypasses Vercel's body-size cap) -----------------
+
+type Ticket = { ticket: string; url: string; exp: number };
+let cachedTicket: Ticket | null = null;
+let ticketInFlight: Promise<Ticket> | null = null;
+
+/**
+ * Fetch a short-lived signed upload ticket (and the Apps Script URL) from our
+ * own server. Cached and shared across concurrent uploads; refreshed before it
+ * expires. The signing secret never reaches the browser.
+ */
+export async function getTicket(): Promise<{ ticket: string; url: string }> {
+  const now = Date.now() / 1000;
+  if (cachedTicket && cachedTicket.exp - now > 120) {
+    return { ticket: cachedTicket.ticket, url: cachedTicket.url };
+  }
+  if (!ticketInFlight) {
+    ticketInFlight = (async () => {
+      try {
+        const res = await fetch("/api/upload-ticket", { method: "POST" });
+        const data = await res.json();
+        if (!res.ok || !data.ok || !data.ticket || !data.url) {
+          throw new Error(data.error || "Could not prepare a direct upload.");
+        }
+        cachedTicket = { ticket: data.ticket, url: data.url, exp: data.exp };
+        return cachedTicket;
+      } finally {
+        ticketInFlight = null;
+      }
+    })();
+  }
+  const t = await ticketInFlight;
+  return { ticket: t.ticket, url: t.url };
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result;
+      if (typeof result !== "string") return reject(new Error("Could not read file."));
+      resolve(result.slice(result.indexOf(",") + 1)); // strip "data:...;base64,"
+    };
+    reader.onerror = () => reject(new Error("Could not read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * Upload a single file straight to the Apps Script Web App, bypassing our
+ * server (and therefore Vercel's body cap). The body is sent as text/plain so
+ * the browser skips the CORS preflight that Apps Script can't answer.
+ */
+export function uploadDirect(
+  file: File,
+  guestName: string,
+  ticket: string,
+  url: string,
+  onProgress: (fraction: number) => void
+): UploadHandle {
+  const xhr = new XMLHttpRequest();
+  let aborted = false;
+
+  const promise = (async () => {
+    const base64 = await fileToBase64(file);
+    if (aborted) throw new DOMException("Aborted", "AbortError");
+
+    return new Promise<void>((resolve, reject) => {
+      xhr.open("POST", url);
+      xhr.timeout = 300_000;
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+
+      xhr.onload = () => {
+        let res: { ok?: boolean; error?: string } = {};
+        try {
+          res = JSON.parse(xhr.responseText);
+        } catch {
+          return reject(new Error("Unexpected response from Google Drive."));
+        }
+        if (xhr.status >= 200 && xhr.status < 300 && res.ok) {
+          onProgress(1);
+          resolve();
+        } else {
+          reject(new Error(res.error || `Upload failed (${xhr.status}).`));
+        }
+      };
+
+      xhr.onerror = () =>
+        reject(new Error("Could not reach Google Drive — check your connection."));
+      xhr.ontimeout = () => reject(new Error("Upload timed out."));
+      xhr.onabort = () => reject(new DOMException("Aborted", "AbortError"));
+
+      // No Content-Type header on purpose: the default text/plain is a
+      // CORS-safelisted type, so no preflight is sent to Apps Script.
+      xhr.send(
+        JSON.stringify({
+          ticket,
+          name: guestName,
+          files: [
+            {
+              name: file.name || "photo",
+              type: file.type || "application/octet-stream",
+              data: base64,
+            },
+          ],
+        })
+      );
+    });
+  })();
+
+  return {
+    promise,
+    abort: () => {
+      aborted = true;
+      xhr.abort();
+    },
+  };
 }
