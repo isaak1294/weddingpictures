@@ -324,9 +324,8 @@ export default function Home() {
             Share Your Photos
           </h1>
           <p className="mt-4 text-navy/70 leading-relaxed">
-            Help us relive the day! Add the photos you captured at our wedding —
-            you can pick 50 or more at once and they&apos;ll upload straight to
-            our album.
+            Help us relive the day! Upload the photos and videos you captured at
+            our wedding and they&apos;ll go straight to our album.
           </p>
         </div>
 
@@ -523,8 +522,7 @@ export default function Home() {
         </div>
 
         <p className="text-center text-navy/40 text-xs mt-6">
-          Photos upload at full resolution, straight to our album, and are
-          shared privately with the couple.
+          Your photos are shared privately with the couple.
         </p>
       </div>
     </main>
