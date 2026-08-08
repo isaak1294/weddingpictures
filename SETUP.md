@@ -58,5 +58,7 @@ Host the app anywhere that runs Next.js (e.g. **Vercel**: `npx vercel`). Add the
 ## Notes & limits
 
 - **Re-deploy after editing `Code.gs`:** use **Manage deployments → edit → New version**, or the URL won't change but the code will.
-- **Upload size:** most hosts cap request bodies (Vercel is ~4.5 MB per request). For phone photos that's usually fine one or two at a time; for large videos, raise the limit on your host or have guests upload fewer files per submission.
+- **Upload size:** photos are resized in the guest's browser (longest edge ~3000 px, high quality) and uploaded **one file per request**, so each request stays well under Vercel's ~4.5 MB body cap. Guests can select 50+ at a time; uploads run 3 at a time with a per-photo progress bar and auto-retry. To keep originals or change quality, edit `DEFAULTS` in `app/lib/uploader.ts`.
+- **Videos & very large files:** these can't be compressed in the browser and will exceed Vercel's ~4.5 MB limit, so they're flagged "too large to upload here" rather than hanging. Collect large videos another way (e.g. a shared Drive/Photos link), or self-host the app to lift the cap.
+- **Background uploads:** true set-and-forget (closing the tab) isn't possible on mobile web — iOS Safari suspends the page when backgrounded. The app requests a screen wake-lock and warns before leaving, so guests should keep the tab in the foreground while uploading.
 - **Security:** the `UPLOAD_TOKEN` stops random people from posting to your Apps Script directly. Keep it out of any public/client code (it already lives only in `.env.local`).
